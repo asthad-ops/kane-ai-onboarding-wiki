@@ -858,7 +858,11 @@ function renderPage(id){
       const selectedText = savedRange ? savedRange.toString() : "";
       const url = prompt("Link URL (include https://):", "https://");
       if(!url) return;
-      const text = prompt("Link text to display:", selectedText || url) || url;
+      const wantsCustomText = confirm("Click OK to give this link custom display text.\nClick Cancel to show the plain URL as the link (e.g. " + url + ").");
+      let text = url;
+      if(wantsCustomText){
+        text = prompt("Link text to display:", selectedText || url) || url;
+      }
       const html = `<a href="${escapeHtml(url)}" target="_blank" rel="noopener">${escapeHtml(text)}</a>`;
       insertAtCursor(html);
     });
