@@ -58,6 +58,14 @@
   .breadcrumb a{color:var(--signal); text-decoration:none;}
   .page-title{font-size:26px; font-weight:700; margin:0 0 20px 0; letter-spacing:-0.015em; outline:none;}
   .page-title[contenteditable="true"]{outline:2px dashed var(--signal); outline-offset:6px; border-radius:6px; padding:4px 6px;}
+  .edit-toolbar{display:none; gap:8px; margin-bottom:14px;}
+  .edit-toolbar.show{display:flex;}
+  .toolbar-btn{
+    font-family:var(--sans); font-size:12.5px; font-weight:600; padding:7px 12px; border-radius:6px;
+    border:1px solid var(--line); background:var(--panel); color:var(--ink); cursor:pointer; display:flex; align-items:center; gap:6px;
+  }
+  .toolbar-btn:hover{background:var(--signal-soft); border-color:var(--signal); color:var(--signal);}
+  .toolbar-btn:disabled{opacity:0.5; cursor:wait;}
   .content{font-size:15px; color:var(--ink); margin-bottom:32px;}
   .content[contenteditable="true"]{outline:2px dashed var(--signal); outline-offset:8px; border-radius:6px; padding:8px 8px 8px 0; background:rgba(31,95,191,0.02); min-height:60px;}
   .content p{margin:0 0 12px 0;}
@@ -65,6 +73,9 @@
   .content li{margin-bottom:6px;}
   .content strong{font-weight:650;}
   .content code{font-family:var(--mono); font-size:0.87em; background:var(--paper); padding:1px 5px; border-radius:4px; border:1px solid var(--line);}
+  .content img{max-width:100%; border-radius:8px; border:1px solid var(--line); margin:6px 0 14px 0; display:block;}
+  .content a.file-attachment{display:inline-flex; align-items:center; gap:6px; background:var(--paper); border:1px solid var(--line); padding:6px 12px; border-radius:6px; text-decoration:none; color:var(--ink); font-size:13.5px; margin:4px 0;}
+  .content a.file-attachment:hover{border-color:var(--signal); color:var(--signal);}
   .content pre{font-family:var(--mono); font-size:12.5px; background:var(--ink); color:#e8e6e1; padding:14px 16px; border-radius:7px; overflow-x:auto; margin:0 0 14px 0; line-height:1.6;}
   .content table{border-collapse:collapse; width:100%; margin:0 0 16px 0; font-size:13.5px;}
   .content th, .content td{border:1px solid var(--line); padding:7px 10px; text-align:left; vertical-align:top;}
@@ -738,6 +749,11 @@ function renderPage(id){
   main.innerHTML = `
     <div class="breadcrumb">${breadcrumb}</div>
     <h1 class="page-title" contenteditable="${editMode}" data-field="title">${escapeHtml(page.title)}</h1>
+    <div class="edit-toolbar ${editMode ? 'show' : ''}">
+      <button class="toolbar-btn" id="attachFileBtn" type="button">📎 Attach file</button>
+      <button class="toolbar-btn" id="addLinkBtn" type="button">🔗 Add link</button>
+      <input type="file" id="attachFileInput" accept=".jpg,.jpeg,.png,.pdf" style="display:none;">
+    </div>
     <div class="content" contenteditable="${editMode}" data-field="body">${page.body}</div>
     ${childrenHtml}
   `;
@@ -759,6 +775,95 @@ function renderPage(id){
     document.getElementById('saveStatus').textContent = "Editing…";
     autosaveTimer = setTimeout(()=>{ savePages(true); document.getElementById('saveStatus').textContent = "Auto-saved " + new Date().toLocaleTimeString(); renderTree(document.getElementById('searchInput').value); }, 900);
   }
+
+  // ---- Track cursor position inside the content editor so toolbar inserts land in the right spot ----
+  let savedRange = null;
+  function captureSelection(){
+    const sel = window.getSelection();
+    if(sel.rangeCount > 0){
+      const range = sel.getRangeAt(0);
+      if(bodyEl.contains(range.commonAncestorContainer)) savedRange = range.cloneRange();
+    }
+  }
+  bodyEl.addEventListener('mouseup', captureSelection);
+  bodyEl.addEventListener('keyup', captureSelection);
+  function insertAtCursor(html){
+    bodyEl.focus();
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    if(savedRange){
+      sel.addRange(savedRange);
+    } else {
+      const range = document.createRange();
+      range.selectNodeAfter ? null : null;
+      range.selectNode(bodyEl);
+      range.collapse(false);
+      sel.addRange(range);
+    }
+    document.execCommand('insertHTML', false, html);
+    captureSelection();
+    onEdit();
+  }
+
+  // ---- Attach file (image or PDF) via Supabase Storage ----
+  const attachBtn = main.querySelector('#attachFileBtn');
+  const fileInput = main.querySelector('#attachFileInput');
+  if(attachBtn){
+    attachBtn.addEventListener('click', ()=>{ captureSelection(); fileInput.click(); });
+    fileInput.addEventListener('change', async ()=>{
+      const file = fileInput.files[0];
+      fileInput.value = "";
+      if(!file) return;
+      if(!SUPABASE_CONFIGURED){
+        showToast("Set up Supabase Storage first — see the setup steps");
+        return;
+      }
+      if(file.size > 10 * 1024 * 1024){
+        showToast("File too large — 10MB limit for now");
+        return;
+      }
+      attachBtn.disabled = true;
+      attachBtn.textContent = "Uploading…";
+      try{
+        const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
+        const path = `${Date.now()}_${safeName}`;
+        const res = await fetch(`${SUPABASE_URL}/storage/v1/object/wiki-attachments/${path}`, {
+          method: "POST",
+          headers: { "apikey": SUPABASE_ANON_KEY, "Authorization": "Bearer " + SUPABASE_ANON_KEY, "Content-Type": file.type || "application/octet-stream" },
+          body: file
+        });
+        if(!res.ok) throw new Error("upload failed: " + res.status);
+        const publicUrl = `${SUPABASE_URL}/storage/v1/object/public/wiki-attachments/${path}`;
+        const isImage = /^image\//.test(file.type) || /\.(jpe?g|png)$/i.test(file.name);
+        const html = isImage
+          ? `<img src="${publicUrl}" alt="${escapeHtml(file.name)}">`
+          : `<a class="file-attachment" href="${publicUrl}" target="_blank" rel="noopener">📄 ${escapeHtml(file.name)}</a>`;
+        insertAtCursor(html + "<p></p>");
+        showToast("File attached");
+      }catch(err){
+        console.error(err);
+        showToast("Upload failed — check the storage bucket setup");
+      }finally{
+        attachBtn.disabled = false;
+        attachBtn.textContent = "📎 Attach file";
+      }
+    });
+  }
+
+  // ---- Add link ----
+  const linkBtn = main.querySelector('#addLinkBtn');
+  if(linkBtn){
+    linkBtn.addEventListener('click', ()=>{
+      captureSelection();
+      const selectedText = savedRange ? savedRange.toString() : "";
+      const url = prompt("Link URL (include https://):", "https://");
+      if(!url) return;
+      const text = prompt("Link text to display:", selectedText || url) || url;
+      const html = `<a href="${escapeHtml(url)}" target="_blank" rel="noopener">${escapeHtml(text)}</a>`;
+      insertAtCursor(html);
+    });
+  }
+
   titleEl.addEventListener('input', onEdit);
   bodyEl.addEventListener('input', onEdit);
 }
